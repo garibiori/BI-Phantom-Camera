@@ -1,6 +1,6 @@
 /**
  * @file trial.cpp
- * @author Ori Garibi
+ * @author Ori Garibi & Tian Lan
  * @brief 
  * @version 0.1
  * @date 2022-07-07
@@ -15,44 +15,52 @@
 #include <direct.h>
 #include <string>
 #include <fstream>
-using namespace Euresys;     
-using namespace std;
 #include "DoublyLinkedList.h"
 #include "Record.h"
+
+using namespace Euresys;     
+using namespace std;
+
 class MyGrabber : public EGrabber<CallbackOnDemand> {
     public:
-        MyGrabber(EGenTL &gentl, int id) : EGrabber<CallbackOnDemand>(gentl, id/2, id%2) { //initializing grabber class to set each grabber setting
-            const int bufferSize = 1;
-            if (id ==0 ) //master grabber
-            {
-                setString<DeviceModule>("CameraControlMethod", "RC");
-                setString<InterfaceModule>("EventSelector", "LIN8");
-                setInteger<InterfaceModule>("EventNotification", true);
-                setString<InterfaceModule>("LineSelector", "TTLIO11");
-                setString<InterfaceModule>("LineMode", "Input");
-                setString<InterfaceModule>("LineInputToolSelector", "LIN8");
-                setString<InterfaceModule>("LineInputToolSource", "TTLIO11");
-                setString<InterfaceModule>("LineInputToolActivation", "RisingEdge");
+        MyGrabber(EGenTL &gentl, int id, int trial, int numBuf, int bufferSize) : EGrabber<CallbackOnDemand>(gentl, id/2, id%2) { //initializing grabber class to set each grabber setting
+            
+            execute<DeviceModule>("DeviceReset");
+            if(trial==1){ //set up only on the first trial
+                if (id == 0) //master grabber
+                {
+                    setString<DeviceModule>("CameraControlMethod", "RC");  //master grabber set to RC, the rest set to NC
+                    setString<InterfaceModule>("EventSelector", "LIN8");
+                    setInteger<InterfaceModule>("EventNotification", true);
+                    setString<InterfaceModule>("LineSelector", "TTLIO11");
+                    setString<InterfaceModule>("LineMode", "Input");
+                    setString<InterfaceModule>("LineInputToolSelector", "LIN8");
+                    setString<InterfaceModule>("LineInputToolSource", "TTLIO11");
+                    setString<InterfaceModule>("LineInputToolActivation", "RisingEdge");
+                    
+                    setString<RemoteModule>("TriggerMode", "TriggerModeOff");
+                    setString<RemoteModule>("TriggerSource", "SWTRIGGER");
+        
+                    setString<RemoteModule>("Banks", "Banks_ABCD");
+                    //setFloat<DeviceModule>("CycleMinimumPeriod",10000.0); // unit is uS. = 10e6/FPS
+
+                    const int fps = 1000;
+
+                    setInteger<RemoteModule>("AcquisitionFrameRate", fps);
+                    setFloat<RemoteModule>("ExposureTime", 9e6/(fps*10)); //convert exposure time to 9e6/(fps*10)
+                    enableEvent<IoToolboxData>();             
+                }
+
+                setString<StreamModule>("StripeArrangement", "Geometry_1X_2YM");
+                setInteger<StreamModule>("LineWidth", 2560);
+                setInteger<StreamModule>("LinePitch", 2560);
+                setInteger<StreamModule>("StripeHeight", 4);
+                setInteger<StreamModule>("StripePitch", 4);
+                setInteger<StreamModule>("BlockHeight", 4);
+                setInteger<StreamModule>("BufferPartCount", bufferSize);
+                setInteger<StreamModule>("StripeOffset", 0);
                 
-                setString<RemoteModule>("TriggerMode", "TriggerModeOn");
-                setString<RemoteModule>("TriggerSource", "SWTRIGGER");
-    
-                setString<RemoteModule>("Banks", "Banks_ABCD");
-                setFloat<RemoteModule>("ExposureTime", 1000);
-                setFloat<DeviceModule>("CycleMinimumPeriod",10000.0);
-                enableEvent<IoToolboxData>();             
             }
-
-            setString<StreamModule>("StripeArrangement", "Geometry_1X_2YM");
-            setInteger<StreamModule>("LineWidth", 2560);
-            setInteger<StreamModule>("LinePitch", 2560);
-            setInteger<StreamModule>("StripeHeight", 4);
-            setInteger<StreamModule>("StripePitch", 4);
-            setInteger<StreamModule>("BlockHeight", 4);
-            setInteger<StreamModule>("BufferPartCount", bufferSize);
-            setInteger<StreamModule>("StripeOffset", 0);
-
-            const int numBuf = 200;
             int listSize = numBuf*bufferSize;
 
             reallocBuffers(numBuf); //reallocate buffers for each grabber
@@ -79,7 +87,7 @@ ofstream openFile(int trialCount){ //opens CSV file and inserts header
 void fileProcessor(ofstream &file, Record rec, int realIndex){ //prints data to CSV, data includes index, timestamp, and trigger
     file<<realIndex<<","<<rec.timeStamp<<","<<rec.trig<<"\n";
 }
-static void sample(int trialCount){
+static void sample(int trialCount, int trial, int numBuf, int bufferSize, double concentration){
     DoublyLinkedList<uint8_t *> *imagePointer[4]; //DLL that stores image pointers for each grabber
     DoublyLinkedList<Record> *records = new DoublyLinkedList<Record>(); //DLL that stores image records
      
@@ -90,16 +98,14 @@ static void sample(int trialCount){
 
     
     IoToolboxData data;
-    const int bufferSize = 1;
-    const int numBuf = 200;
     const int listSize = numBuf*bufferSize;
     ofstream timer = openFile(trialCount); //open file
     EGenTL genTL; // load GenTL producer
     MyGrabber* grabber[4]; //select the four grabbers
 
-    for (int i = 0; i<4; i++)
+    for (int i=0; i<4; i++)
     {
-        grabber[i] = new MyGrabber(genTL,i); // create grabber
+        grabber[i] = new MyGrabber(genTL,i, trial, numBuf, bufferSize); // create grabber
     }
 
     for ( int i=3; i>-1; i--)
@@ -112,10 +118,11 @@ static void sample(int trialCount){
     bool trig = false;
     bool didTrigger = false;
     int numTrig = grabber[0]->getInteger<InterfaceModule>("EventCount[LIN8]");
-    int halfList = listSize/2;
+    int halfList = listSize*concentration;
+
     for (size_t frame=0;frame < listSize; ++frame) { //start taking images
-        if(frame >= halfList && didTrigger == false){ //if half the images have been taken and no trigger has been detected clear the back of the DLL for images and records
-            for ( int i=0; i <4; i++)
+        if(frame >= halfList && didTrigger == false){ //if the concentration of the images have been taken and no trigger has been detected clear the back of the DLL for images and records
+            for (int i=0; i <4; i++)
             {
                 imagePointer[i]->removeBack();
             }
@@ -123,7 +130,7 @@ static void sample(int trialCount){
             --frame; //go back a frame
         }
         trig = false;
-        numTrig = grabber[0]->getInteger<InterfaceModule>("EventCount[LIN8]"); //check for trigger
+
         cout<<"Grabbing frame "<<frame<<endl;
 
         ScopedBuffer b0(*grabber[0]); // wait and get a buffer
@@ -142,14 +149,17 @@ static void sample(int trialCount){
         uint64_t t1 = b1.getInfo<uint64_t>(gc::BUFFER_INFO_TIMESTAMP);
         uint64_t t2 = b2.getInfo<uint64_t>(gc::BUFFER_INFO_TIMESTAMP);
         uint64_t t3 = b3.getInfo<uint64_t>(gc::BUFFER_INFO_TIMESTAMP);
+
         if(grabber[0]->getInteger<InterfaceModule>("EventCount[LIN8]") > numTrig && frame+1 >= halfList){ //trigger bools
             trig = true;
             didTrigger = true;
         }
+
         uint64_t tavg = (t0+t1+t2+t3)/4; //averave each grabber's timestamp
         Record record = Record(frame, tavg, trig);
         records->insertFront(record); //insert image record to list
     }
+    
     const std::string format (grabber[0]->getPixelFormat()); //save image formats
     const size_t width = grabber[0]->getWidth();
     const size_t height = grabber[0]->getHeight();
@@ -158,7 +168,7 @@ static void sample(int trialCount){
 
     uint8_t * des = (uint8_t*) malloc (imgSize*4); //allocate destination memory for images
 
-    for (size_t frames=0;frames < listSize; ++frames) { //begin saving
+    for (size_t frames=0; frames<listSize; ++frames) { //begin saving
         cout<<"Saving frame "<<frames<<" to disk "<<endl;
         uint8_t* t[4];
         t[0]= imagePointer[0]->removeBack(); //remove each frame from the back of the DLL
@@ -167,22 +177,22 @@ static void sample(int trialCount){
         t[3]= imagePointer[3]->removeBack();
 
         uint8_t * tmp = des;
-         for (int i=0; i< height/4; i++)            // top part loop through the whole image , each time copying 4 (subimages) *2 = 8 lines 
+         for (int i=0; i<height/4; i++)            // top part loop through the whole image , each time copying 4 (subimages) *2 = 8 lines 
         {
-            for ( int j=3; j>-1; j--)               // loops through the 4 sub image 
+            for (int j=3; j>-1; j--)               // loops through the 4 sub image 
             {
                 memcpy(tmp,t[j],imgPitch*2);        // copy 2 lines from sub image j to current location of the pointer
-                tmp +=imgPitch*2;                   // move pointer forward by 2 lines
+                tmp +=  imgPitch*2;                 // move pointer forward by 2 lines
                 t[j] += imgPitch*2;                 // move in the sub image the current pointer
             }
         }       
         
-        for (int i=height/4; i< height/2; i++)      // bottom part loop through the whole image , each time copying 4 ( subimages) *2 = 8 lines 
+        for (int i=height/4; i<height/2; i++)      // bottom part loop through the whole image , each time copying 4 ( subimages) *2 = 8 lines 
         {
-            for ( int j=0; j<4; j++)                // loops through the 4 sub image 
+            for (int j=0; j<4; j++)                // loops through the 4 sub image 
             {
                 memcpy(tmp,t[j],imgPitch*2);        // copy 2 lines from sub image j to current location of the pointer
-                tmp +=imgPitch*2;                   // move pointer forward by 2 lines
+                tmp += imgPitch*2;                   // move pointer forward by 2 lines
                 t[j] += imgPitch*2;                 // move in the sub image the current pointer
             }
         }
@@ -198,11 +208,15 @@ static void sample(int trialCount){
 
 
 int main(){
-    int numTrials = 2;
+    //make it possible to change the before after ammount of images
+    int numTrials = 6;
+    int numBuf = 500;
+    int bufferSize = 1;
+    double concentration = 0.8;
     for(int trialCount = 1; trialCount <= numTrials; ++trialCount){ //run for certain ammount of trials
         string temp = "D:/cameraOutput/Trial" + to_string(trialCount); //create directory for images and files
         mkdir(temp.c_str());
-        sample(trialCount);
+        sample(trialCount, trialCount, numBuf, bufferSize, concentration);
     }
     return 0;
 }
