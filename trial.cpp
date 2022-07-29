@@ -26,41 +26,42 @@ class MyGrabber : public EGrabber<CallbackOnDemand> {
         MyGrabber(EGenTL &gentl, int id, int trial, int numBuf, int bufferSize) : EGrabber<CallbackOnDemand>(gentl, id/2, id%2) { //initializing grabber class to set each grabber setting
             
             execute<DeviceModule>("DeviceReset");
-            if(trial==1){ //set up only on the first trial
-                if (id == 0) //master grabber
-                {
-                    setString<DeviceModule>("CameraControlMethod", "RC");  //master grabber set to RC, the rest set to NC
-                    setString<InterfaceModule>("EventSelector", "LIN8");
-                    setInteger<InterfaceModule>("EventNotification", true);
-                    setString<InterfaceModule>("LineSelector", "TTLIO11");
-                    setString<InterfaceModule>("LineMode", "Input");
-                    setString<InterfaceModule>("LineInputToolSelector", "LIN8");
-                    setString<InterfaceModule>("LineInputToolSource", "TTLIO11");
-                    setString<InterfaceModule>("LineInputToolActivation", "RisingEdge");
+            if (id == 0) //master grabber
+            {
+                execute<RemoteModule>("AcquisitionStop");   // in case we stop before the end
+                setString<DeviceModule>("CameraControlMethod", "RC");  //master grabber set to RC, the rest set to NC
+                setString<DeviceModule>("ExposureReadoutOverlap", "True"); 
+                setString<InterfaceModule>("EventSelector", "LIN8");
+                setInteger<InterfaceModule>("EventNotification", true);
+                setString<InterfaceModule>("LineSelector", "TTLIO11");
+                setString<InterfaceModule>("LineMode", "Input");
+                setString<InterfaceModule>("LineInputToolSelector", "LIN8");
+                setString<InterfaceModule>("LineInputToolSource", "TTLIO11");
+                setString<InterfaceModule>("LineInputToolActivation", "RisingEdge");
+                setString<InterfaceModule>("LineFilterStrength", "Highest"); //set trigger strength filter
                     
-                    setString<RemoteModule>("TriggerMode", "TriggerModeOff");
-                    setString<RemoteModule>("TriggerSource", "SWTRIGGER");
+                setString<RemoteModule>("TriggerMode", "TriggerModeOn");
+                setString<RemoteModule>("TriggerSource", "SWTRIGGER");
         
-                    setString<RemoteModule>("Banks", "Banks_ABCD");
-                    //setFloat<DeviceModule>("CycleMinimumPeriod",10000.0); // unit is uS. = 10e6/FPS
+                setString<RemoteModule>("Banks", "Banks_ABCD");
+                setFloat<DeviceModule>("CycleMinimumPeriod",1000.0); // unit is uS. = 10e6/FPS
 
-                    const int fps = 1000;
+                const int fps = 1000;
 
-                    setInteger<RemoteModule>("AcquisitionFrameRate", fps);
-                    setFloat<RemoteModule>("ExposureTime", 9e6/(fps*10)); //convert exposure time to 9e6/(fps*10)
-                    enableEvent<IoToolboxData>();             
-                }
-
-                setString<StreamModule>("StripeArrangement", "Geometry_1X_2YM");
-                setInteger<StreamModule>("LineWidth", 2560);
-                setInteger<StreamModule>("LinePitch", 2560);
-                setInteger<StreamModule>("StripeHeight", 4);
-                setInteger<StreamModule>("StripePitch", 4);
-                setInteger<StreamModule>("BlockHeight", 4);
-                setInteger<StreamModule>("BufferPartCount", bufferSize);
-                setInteger<StreamModule>("StripeOffset", 0);
-                
+                //setInteger<RemoteModule>("AcquisitionFrameRate", fps);
+                setFloat<RemoteModule>("ExposureTime", 9e6/(fps*10)); //convert exposure time to 9e6/(fps*10)
+                enableEvent<IoToolboxData>();             
             }
+
+            setString<StreamModule>("StripeArrangement", "Geometry_1X_2YM");
+            setInteger<StreamModule>("LineWidth", 2560);
+            setInteger<StreamModule>("LinePitch", 2560);
+            setInteger<StreamModule>("StripeHeight", 4);
+            setInteger<StreamModule>("StripePitch", 4);
+            setInteger<StreamModule>("BlockHeight", 4);
+            setInteger<StreamModule>("BufferPartCount", bufferSize);
+            setInteger<StreamModule>("StripeOffset", 0);
+
             int listSize = numBuf*bufferSize;
 
             reallocBuffers(numBuf); //reallocate buffers for each grabber
@@ -90,7 +91,6 @@ void fileProcessor(ofstream &file, Record rec, int realIndex){ //prints data to 
 static void sample(int trialCount, int trial, int numBuf, int bufferSize, double concentration){
     DoublyLinkedList<uint8_t *> *imagePointer[4]; //DLL that stores image pointers for each grabber
     DoublyLinkedList<Record> *records = new DoublyLinkedList<Record>(); //DLL that stores image records
-     
     for (int i =0; i<4; i++)
     {
         imagePointer[i] = new DoublyLinkedList<uint8_t *>();
@@ -114,23 +114,25 @@ static void sample(int trialCount, int trial, int numBuf, int bufferSize, double
     }
 
     FormatConverter converter(genTL); // create rgb converter environment
-    int i = 0;
+    //int i = 0;
     bool trig = false;
-    bool didTrigger = false;
     int numTrig = grabber[0]->getInteger<InterfaceModule>("EventCount[LIN8]");
     int halfList = listSize*concentration;
-
+    bool stopCheck = false;
     for (size_t frame=0;frame < listSize; ++frame) { //start taking images
-        if(frame >= halfList && didTrigger == false){ //if the concentration of the images have been taken and no trigger has been detected clear the back of the DLL for images and records
+        if(frame >= halfList && stopCheck == false){ //if the concentration of the images have been taken and no trigger has been detected clear the back of the DLL for images and records
             for (int i=0; i <4; i++)
             {
                 imagePointer[i]->removeBack();
             }
             records->removeBack();
             --frame; //go back a frame
+            stringstream msg;
+            imagePointer[0]->getSize();
+            msg << "remove back "  << frame << " current size " <<imagePointer[0]->getSize();
+            genTL.memento(msg.str());
         }
         trig = false;
-
         cout<<"Grabbing frame "<<frame<<endl;
 
         ScopedBuffer b0(*grabber[0]); // wait and get a buffer
@@ -140,26 +142,33 @@ static void sample(int trialCount, int trial, int numBuf, int bufferSize, double
 
         const size_t imgSize = b0.getInfo<size_t>(gc::BUFFER_INFO_SIZE);
 
-        imagePointer[0]->insertFront(b0.getInfo<uint8_t *>(gc::BUFFER_INFO_BASE) + (frame%bufferSize)*imgSize/bufferSize); //grab images for each grabber
-        imagePointer[1]->insertFront(b1.getInfo<uint8_t *>(gc::BUFFER_INFO_BASE) + (frame%bufferSize)*imgSize/bufferSize);
-        imagePointer[2]->insertFront(b2.getInfo<uint8_t *>(gc::BUFFER_INFO_BASE) + (frame%bufferSize)*imgSize/bufferSize);
-        imagePointer[3]->insertFront(b3.getInfo<uint8_t *>(gc::BUFFER_INFO_BASE) + (frame%bufferSize)*imgSize/bufferSize);
+        imagePointer[0]->insertFront(b0.getInfo<uint8_t *>(gc::BUFFER_INFO_BASE)); // + (frame%bufferSize)*imgSize/bufferSize); //grab images for each grabber
+        imagePointer[1]->insertFront(b1.getInfo<uint8_t *>(gc::BUFFER_INFO_BASE)); // + (frame%bufferSize)*imgSize/bufferSize);
+        imagePointer[2]->insertFront(b2.getInfo<uint8_t *>(gc::BUFFER_INFO_BASE)); //+ (frame%bufferSize)*imgSize/bufferSize);
+        imagePointer[3]->insertFront(b3.getInfo<uint8_t *>(gc::BUFFER_INFO_BASE)); // + (frame%bufferSize)*imgSize/bufferSize);
         
         uint64_t t0 = b0.getInfo<uint64_t>(gc::BUFFER_INFO_TIMESTAMP); //get each grabber's timestamp
         uint64_t t1 = b1.getInfo<uint64_t>(gc::BUFFER_INFO_TIMESTAMP);
         uint64_t t2 = b2.getInfo<uint64_t>(gc::BUFFER_INFO_TIMESTAMP);
         uint64_t t3 = b3.getInfo<uint64_t>(gc::BUFFER_INFO_TIMESTAMP);
 
-        if(grabber[0]->getInteger<InterfaceModule>("EventCount[LIN8]") > numTrig && frame+1 >= halfList){ //trigger bools
+        if(grabber[0]->getInteger<InterfaceModule>("EventCount[LIN8]") > numTrig && frame+1 >= halfList && stopCheck == false){ //trigger bools
             trig = true;
-            didTrigger = true;
+            stopCheck = true;
+            genTL.memento("got trigger");
         }
-
         uint64_t tavg = (t0+t1+t2+t3)/4; //averave each grabber's timestamp
         Record record = Record(frame, tavg, trig);
         records->insertFront(record); //insert image record to list
     }
     
+    stringstream msg;
+    msg << "finish recording, list size is " << imagePointer[0]->getSize();
+    genTL.memento(msg.str());
+    for (int i=0; i<4; i++)
+    {
+        grabber[i]->stop();
+    }
     const std::string format (grabber[0]->getPixelFormat()); //save image formats
     const size_t width = grabber[0]->getWidth();
     const size_t height = grabber[0]->getHeight();
@@ -167,7 +176,6 @@ static void sample(int trialCount, int trial, int numBuf, int bufferSize, double
     const size_t imgSize = height*imgPitch;
 
     uint8_t * des = (uint8_t*) malloc (imgSize*4); //allocate destination memory for images
-
     for (size_t frames=0; frames<listSize; ++frames) { //begin saving
         cout<<"Saving frame "<<frames<<" to disk "<<endl;
         uint8_t* t[4];
@@ -175,44 +183,59 @@ static void sample(int trialCount, int trial, int numBuf, int bufferSize, double
         t[1]= imagePointer[1]->removeBack();
         t[2]= imagePointer[2]->removeBack();
         t[3]= imagePointer[3]->removeBack();
-
         uint8_t * tmp = des;
-         for (int i=0; i<height/4; i++)            // top part loop through the whole image , each time copying 4 (subimages) *2 = 8 lines 
+        for (int  j=0; j <  bufferSize; j++) //do this for each buffer part
         {
-            for (int j=3; j>-1; j--)               // loops through the 4 sub image 
+            for (int i=0; i<height/4; i++)            // top part loop through the whole image , each time copying 4 (subimages) *2 = 8 lines 
             {
-                memcpy(tmp,t[j],imgPitch*2);        // copy 2 lines from sub image j to current location of the pointer
-                tmp +=  imgPitch*2;                 // move pointer forward by 2 lines
-                t[j] += imgPitch*2;                 // move in the sub image the current pointer
-            }
-        }       
-        
-        for (int i=height/4; i<height/2; i++)      // bottom part loop through the whole image , each time copying 4 ( subimages) *2 = 8 lines 
-        {
-            for (int j=0; j<4; j++)                // loops through the 4 sub image 
+                for (int j=3; j>-1; j--)               // loops through the 4 sub image 
+                {
+                    memcpy(tmp,t[j],imgPitch*2);        // copy 2 lines from sub image j to current location of the pointer
+                    tmp +=  imgPitch*2;                 // move pointer forward by 2 lines
+                    t[j] += imgPitch*2;                 // move in the sub image the current pointer
+                }
+            }       
+            
+            for (int i=height/4; i<height/2; i++)      // bottom part loop through the whole image , each time copying 4 ( subimages) *2 = 8 lines 
             {
-                memcpy(tmp,t[j],imgPitch*2);        // copy 2 lines from sub image j to current location of the pointer
-                tmp += imgPitch*2;                   // move pointer forward by 2 lines
-                t[j] += imgPitch*2;                 // move in the sub image the current pointer
+                for (int j=0; j<4; j++)                // loops through the 4 sub image 
+                {
+                    memcpy(tmp,t[j],imgPitch*2);        // copy 2 lines from sub image j to current location of the pointer
+                    tmp += imgPitch*2;                   // move pointer forward by 2 lines
+                    t[j] += imgPitch*2;                 // move in the sub image the current pointer
+                }
             }
+
+            stringstream msg;
+            msg << "save image, remaining " << imagePointer[0]->getSize();
+            genTL.memento(msg.str());
+            FormatConverter::Auto bgr(converter, FormatConverter::OutputFormat("RGB8"), des, format, width,  height * 4 * bufferSize, imgSize *4 *bufferSize, imgPitch);
+                bgr.saveToDisk("D:/cameraOutput/Trial"+to_string(trialCount)+"/frame.NNN.jpeg", frames * bufferSize +j); //save stitched images
+            fileProcessor(timer, records->removeBack(), frames * bufferSize +j); //assign index and write image data
+            t[0] += imgSize; //iterate to next buffer part
+            t[1] += imgSize;
+            t[2] += imgSize;
+            t[3] += imgSize;
         }
-
-
-        FormatConverter::Auto bgr(converter, FormatConverter::OutputFormat("RGB8"), des, format, width,  height * 4 * bufferSize, imgSize *4 *bufferSize, imgPitch);
-            bgr.saveToDisk("D:/cameraOutput/Trial"+to_string(trialCount)+"/frame.NNN.jpeg", frames); //save stitched images
-        fileProcessor(timer, records->removeBack(), frames); //assign index and write image data
     }
     free(des);
     timer.close(); //close file
+    for (int i=0; i<4; i++)
+    {
+        delete(grabber[i]);
+        delete(imagePointer[i]);
+    }
+    genTL.memento("delete grabbers");
+    delete (records);
 }
 
 
 int main(){
     //make it possible to change the before after ammount of images
-    int numTrials = 6;
-    int numBuf = 500;
+    int numTrials = 5;
+    int numBuf = 600;
     int bufferSize = 1;
-    double concentration = 0.8;
+    double concentration = 0.5;
     for(int trialCount = 1; trialCount <= numTrials; ++trialCount){ //run for certain ammount of trials
         string temp = "D:/cameraOutput/Trial" + to_string(trialCount); //create directory for images and files
         mkdir(temp.c_str());
